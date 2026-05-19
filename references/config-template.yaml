@@ -1,0 +1,18 @@
+zotero:
+  library_id: ""        # Your Zotero user ID (from https://www.zotero.org/settings/keys)
+  api_key: ""           # Create at https://www.zotero.org/settings/keys/new
+  library_type: "user"  # "user" for personal, "group" for group library
+
+sync:
+  default_depth: 1      # 0=metadata, 1=+abstract, 2=+fulltext, 3=+summary+citations
+
+pdf:
+  download_enabled: true
+  scihub_mirror: "https://sci-hub.se"
+  download_timeout: 60
+
+storage:
+  data_dir: "../zotero-data"
+
+summarization:
+  auto_summarize_new: false

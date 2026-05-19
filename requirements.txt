@@ -1,0 +1,4 @@
+pyzotero>=1.5.0
+requests>=2.31.0
+markitdown>=0.1.0
+pyyaml>=6.0
