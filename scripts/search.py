@@ -8,7 +8,21 @@ from config import load_config, get_data_dir
 
 
 def format_item(item: dict, mode: str = "brief") -> str:
+    # Helper: extract first author last name
+    def _first_author(item):
+        authors = item.get("creators", "[]")
+        if isinstance(authors, str):
+            try:
+                authors = json.loads(authors)
+            except (json.JSONDecodeError, TypeError):
+                return "?"
+        if authors:
+            return authors[0].get("lastName", authors[0].get("name", "?"))
+        return "?"
+
     if mode == "brief":
+        first = _first_author(item)
+        year = item.get("date", "?")[:4] if item.get("date") else "?"
         authors = item.get("creators", "[]")
         if isinstance(authors, str):
             try:
@@ -21,15 +35,18 @@ def format_item(item: dict, mode: str = "brief") -> str:
             author_str = ", ".join(names)
             if len(authors) > 3:
                 author_str += " et al."
+        key = item.get("key", "")
         return (
-            f"[{item.get('date', 'N/A')}] {item.get('title', 'Untitled')}\n"
+            f"{first} ({year}) — {item.get('title', 'Untitled')}\n"
             f"  Authors: {author_str or 'N/A'}\n"
             f"  Journal: {item.get('publication', 'N/A')}  DOI: {item.get('doi', 'N/A')}\n"
-            f"  Level: L{item.get('processing_level', 0)}  Key: {item.get('key', '')}"
+            f"  Level: L{item.get('processing_level', 0)}  Key: {key}"
         )
 
     elif mode == "rag":
-        parts = [f"Title: {item.get('title', 'Untitled')}"]
+        first = _first_author(item)
+        year = item.get("date", "?")[:4] if item.get("date") else "?"
+        parts = [f"Title: {item.get('title', 'Untitled')} ({first}, {year})"]
         authors = item.get("creators", "[]")
         if isinstance(authors, str):
             try:
