@@ -52,8 +52,7 @@ def init_db(conn: sqlite3.Connection):
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-            title, abstract, full_text, summary,
-            content='items', content_rowid='id'
+            title, abstract, full_text, summary
         );
 
         CREATE TABLE IF NOT EXISTS citations (
@@ -113,11 +112,10 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
             json.dumps(item_data, ensure_ascii=False), key
         ))
         rid = rowid["id"]
-        # Refresh FTS
-        conn.execute("""
-            INSERT INTO items_fts(id, title, abstract) VALUES (?,?,?)
-            ON CONFLICT(id) DO UPDATE SET title=excluded.title, abstract=excluded.abstract
-        """, (rid, data.get("title", ""), data.get("abstractNote", "")))
+        # Refresh FTS (content-sync uses rowid)
+        conn.execute("DELETE FROM items_fts WHERE rowid=?", (rid,))
+        conn.execute("INSERT INTO items_fts(rowid, title, abstract) VALUES (?,?,?)",
+                     (rid, data.get("title", ""), data.get("abstractNote", "")))
     else:
         c = conn.execute("""
             INSERT INTO items (key,item_type,title,creators,date,publication,
@@ -132,9 +130,8 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
             json.dumps(item_data, ensure_ascii=False)
         ))
         rid = c.lastrowid
-        conn.execute("""
-            INSERT INTO items_fts(id, title, abstract) VALUES (?,?,?)
-        """, (rid, data.get("title", ""), data.get("abstractNote", "")))
+        conn.execute("INSERT INTO items_fts(rowid, title, abstract) VALUES (?,?,?)",
+                     (rid, data.get("title", ""), data.get("abstractNote", "")))
     conn.commit()
     return rid
 
@@ -165,10 +162,10 @@ def update_full_text(conn, key: str, full_text: str):
     """Store full text in FTS index."""
     row = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
     if row:
-        conn.execute("""
-            INSERT INTO items_fts(id, full_text) VALUES (?,?)
-            ON CONFLICT(id) DO UPDATE SET full_text = excluded.full_text
-        """, (row["id"], full_text))
+        # FTS5 content-sync: delete then insert with rowid
+        conn.execute("DELETE FROM items_fts WHERE rowid=?", (row["id"],))
+        conn.execute("INSERT INTO items_fts(rowid, full_text) VALUES (?,?)",
+                     (row["id"], full_text))
         update_processing_level(conn, key, 2)
 
 
@@ -176,10 +173,10 @@ def update_summary(conn, key: str, summary: str):
     """Store LLM summary in FTS index and items table."""
     row = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
     if row:
-        conn.execute("""
-            INSERT INTO items_fts(id, summary) VALUES (?,?)
-            ON CONFLICT(id) DO UPDATE SET summary = excluded.summary
-        """, (row["id"], summary))
+        # FTS5 content-sync: delete then insert with rowid
+        conn.execute("DELETE FROM items_fts WHERE rowid=?", (row["id"],))
+        conn.execute("INSERT INTO items_fts(rowid, summary) VALUES (?,?)",
+                     (row["id"], summary))
         conn.execute("UPDATE items SET local_summary = ? WHERE key = ?", (summary, key))
         update_processing_level(conn, key, 3)
 
@@ -191,7 +188,7 @@ def search_fts(conn, query: str, top_k: int = 10, level_min: int = 0) -> list[di
     rows = conn.execute("""
         SELECT items.*, items_fts.rank
         FROM items_fts
-        JOIN items ON items_fts.id = items.id
+        JOIN items ON items_fts.rowid = items.id
         WHERE items_fts MATCH ? AND items.processing_level >= ?
         ORDER BY rank
         LIMIT ?

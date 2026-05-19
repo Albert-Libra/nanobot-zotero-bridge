@@ -92,7 +92,7 @@ def main():
     if args.mode == "rag":
         output = build_rag_context(results)
     else:
-        output = f"Found {len(results)} results for: {query}\n"
+        output = f"Showing top {len(results)} results for: {query}\n"
         for i, item in enumerate(results, 1):
             output += f"\n--- Result {i} ---\n"
             output += format_item(item, args.mode)
