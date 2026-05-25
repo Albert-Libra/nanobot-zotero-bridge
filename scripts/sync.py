@@ -1,7 +1,21 @@
 #!/usr/bin/env python
-"""Sync engine: pull items from Zotero Web API into local SQLite database."""
+"""Sync engine: pull items from Zotero Web API into local SQLite database.
+
+Depth levels:
+  0 — metadata only
+  1 — +abstract
+  2 — +fulltext (auto-download PDFs via Unpaywall / Sci-Hub)
+  3 — +LLM summary + citation graph
+"""
 import argparse
+import io
 import sys
+
+# Fix Unicode output on Windows GBK console
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 from pyzotero import Zotero
 from db import get_db, init_db, upsert_item, get_stats, load_sync_state, save_sync_state, set_db_path
 from config import load_config, get_data_dir
@@ -50,10 +64,14 @@ def sync_items(zot: Zotero, conn, incremental: bool = True, limit: int = 100):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync Zotero library to local DB")
-    parser.add_argument("--depth", type=int, default=1)
+    parser = argparse.ArgumentParser(
+        description="Sync Zotero library to local DB")
+    parser.add_argument("--depth", type=int, default=1,
+                        help="0=metadata, 1=+abstract, 2=+fulltext(download PDFs), 3=+summary")
     parser.add_argument("--full", action="store_true",
                         help="Force full sync (ignore incremental state)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Max PDFs to download at depth >= 2 (0 = all)")
     args = parser.parse_args()
 
     config = load_config()
@@ -61,14 +79,16 @@ def main():
     set_db_path(data_dir)
 
     zot_config = config["zotero"]
-    zot = Zotero(zot_config["library_id"], zot_config["library_type"], zot_config["api_key"])
+    zot = Zotero(zot_config["library_id"], zot_config["library_type"],
+                 zot_config["api_key"])
 
     conn = get_db()
     init_db(conn)
 
-    print(f"Zotero Bridge — Sync")
+    print(f"Zotero Bridge — Sync (depth={args.depth})")
     print(f"  Library: {zot_config['library_id']} ({zot_config['library_type']})")
 
+    # --- Depth 0-1: metadata sync ---
     try:
         sync_items(zot, conn, incremental=not args.full)
     except Exception as e:
@@ -76,11 +96,24 @@ def main():
         conn.close()
         sys.exit(1)
 
+    # --- Depth 2+: full-text PDF acquisition ---
+    if args.depth >= 2:
+        from ingest import batch_ingest
+        print(f"\n  --- Depth 2: PDF acquisition ---")
+        batch_ingest(config, limit=args.limit)
+
+    # --- Depth 3+: LLM summaries ---
+    if args.depth >= 3:
+        print(f"\n  --- Depth 3: LLM summarization ---")
+        # TODO: call summarize.py batch
+        print("  (summarization not yet integrated — use summarize.py directly)")
+
     stats = get_stats(conn)
     print(f"\n  Library: {stats['total']} items | "
           f"L1:{stats['L1_abstract']} L2:{stats['L2_fulltext']} L3:{stats['L3_summarized']} | "
           f"PDFs:{stats['with_pdf']}")
     conn.close()
+
 
 if __name__ == "__main__":
     main()

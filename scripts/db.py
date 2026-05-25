@@ -27,6 +27,32 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def _extract_creators_text(creators_json: str | list | None) -> str:
+    """Extract a searchable text string from creators JSON, 
+    e.g. 'Zinn, Hoerlin, Petschek'."""
+    if not creators_json:
+        return ""
+    if isinstance(creators_json, str):
+        try:
+            creators = json.loads(creators_json)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+    else:
+        creators = creators_json
+    if not isinstance(creators, list):
+        return ""
+    names = []
+    for c in creators:
+        if isinstance(c, dict):
+            last = c.get("lastName", "")
+            first = c.get("firstName", "")
+            if last:
+                names.append(f"{last}, {first}" if first else last)
+        elif isinstance(c, str):
+            names.append(c)
+    return "; ".join(names)
+
+
 def init_db(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS items (
@@ -35,6 +61,7 @@ def init_db(conn: sqlite3.Connection):
             item_type TEXT,
             title TEXT,
             creators TEXT,
+            creators_text TEXT,
             date TEXT,
             publication TEXT,
             doi TEXT,
@@ -52,7 +79,7 @@ def init_db(conn: sqlite3.Connection):
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-            title, abstract, full_text, summary
+            creators_text, title, abstract, full_text, summary, date
         );
 
         CREATE TABLE IF NOT EXISTS citations (
@@ -77,7 +104,69 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_items_processing ON items(processing_level);
         CREATE INDEX IF NOT EXISTS idx_citations_paper ON citations(paper_key);
     """)
+    # Migration: add creators_text column if missing (for databases created before v2)
+    _migrate_add_creators_text(conn)
+    # Migration: rebuild FTS if schema is old (missing creators_text)
+    _migrate_fts_schema(conn)
     conn.commit()
+
+
+def _migrate_add_creators_text(conn):
+    """Add creators_text column to items if it doesn't exist."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall()]
+    if "creators_text" not in cols:
+        conn.execute("ALTER TABLE items ADD COLUMN creators_text TEXT DEFAULT ''")
+        # Populate from existing creators JSON
+        rows = conn.execute(
+            "SELECT id, creators FROM items WHERE creators_text IS NULL OR creators_text=''"
+        ).fetchall()
+        for row in rows:
+            ct = _extract_creators_text(row["creators"])
+            conn.execute("UPDATE items SET creators_text=? WHERE id=?", (ct, row["id"]))
+
+
+def _migrate_fts_schema(conn):
+    """Rebuild FTS if it's missing creators_text or date columns."""
+    fts_info = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='items_fts'"
+    ).fetchone()
+    if fts_info and "creators_text" in fts_info["sql"] and "date" in fts_info["sql"]:
+        return  # Already migrated
+
+    # Preserve existing FTS data (full_text may exist from L2 ingestion)
+    old_fts = {}
+    try:
+        old_rows = conn.execute(
+            "SELECT rowid, title, abstract, full_text, summary FROM items_fts"
+        ).fetchall()
+        for r in old_rows:
+            old_fts[r["rowid"]] = dict(r)
+    except Exception:
+        pass
+
+    # Drop old FTS and recreate with creators_text + date
+    conn.execute("DROP TABLE IF EXISTS items_fts")
+    conn.execute("""
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+            creators_text, title, abstract, full_text, summary, date
+        )
+    """)
+    # Rebuild FTS from items table + preserved old FTS data
+    rows = conn.execute(
+        "SELECT id, creators_text, title, abstract, local_summary, date FROM items"
+    ).fetchall()
+    for row in rows:
+        rid = row["id"]
+        old = old_fts.get(rid, {})
+        conn.execute(
+            "INSERT INTO items_fts(rowid, creators_text, title, abstract, "
+            "full_text, summary, date) VALUES (?,?,?,?,?,?,?)",
+            (rid, row["creators_text"] or "",
+             row["title"] or "", row["abstract"] or "",
+             old.get("full_text") or "",
+             row["local_summary"] or old.get("summary") or "",
+             row["date"] or "")
+        )
 
 
 # ── Items CRUD ──────────────────────────────────────────────
@@ -88,6 +177,7 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
     rowid = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
 
     creators = json.dumps(data.get("creators", []), ensure_ascii=False)
+    creators_text = _extract_creators_text(data.get("creators", []))
     tags_raw = data.get("tags", [])
     tags_json = json.dumps(
         [t.get("tag", t) if isinstance(t, dict) else t for t in tags_raw],
@@ -99,12 +189,13 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
 
     if rowid:
         conn.execute("""
-            UPDATE items SET item_type=?, title=?, creators=?, date=?,
-                publication=?, doi=?, url=?, abstract=?, tags=?,
+            UPDATE items SET item_type=?, title=?, creators=?, creators_text=?,
+                date=?, publication=?, doi=?, url=?, abstract=?, tags=?,
                 collections=?, version=?, date_added=?, date_modified=?, raw_json=?
             WHERE key=?
         """, (
-            data.get("itemType"), data.get("title"), creators, data.get("date"),
+            data.get("itemType"), data.get("title"), creators, creators_text,
+            data.get("date"),
             data.get("publicationTitle") or data.get("repository"),
             data.get("DOI"), data.get("url"), data.get("abstractNote"),
             tags_json, collections, data.get("version", 0),
@@ -112,17 +203,21 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
             json.dumps(item_data, ensure_ascii=False), key
         ))
         rid = rowid["id"]
-        # Refresh FTS (content-sync uses rowid)
-        conn.execute("DELETE FROM items_fts WHERE rowid=?", (rid,))
-        conn.execute("INSERT INTO items_fts(rowid, title, abstract) VALUES (?,?,?)",
-                     (rid, data.get("title", ""), data.get("abstractNote", "")))
+        # Refresh FTS — preserve other fields, only update creators_text, title, abstract, date
+        _fts_partial_update(conn, rid,
+                           creators_text=creators_text,
+                           title=data.get("title", ""),
+                           abstract=data.get("abstractNote", ""),
+                           date=data.get("date", ""))
     else:
         c = conn.execute("""
-            INSERT INTO items (key,item_type,title,creators,date,publication,
-                doi,url,abstract,tags,collections,version,date_added,date_modified,raw_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO items (key,item_type,title,creators,creators_text,
+                date,publication,doi,url,abstract,tags,collections,
+                version,date_added,date_modified,raw_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            key, data.get("itemType"), data.get("title"), creators, data.get("date"),
+            key, data.get("itemType"), data.get("title"),
+            creators, creators_text, data.get("date"),
             data.get("publicationTitle") or data.get("repository"),
             data.get("DOI"), data.get("url"), data.get("abstractNote"),
             tags_json, collections, data.get("version", 0),
@@ -130,10 +225,40 @@ def upsert_item(conn: sqlite3.Connection, item_data: dict) -> int:
             json.dumps(item_data, ensure_ascii=False)
         ))
         rid = c.lastrowid
-        conn.execute("INSERT INTO items_fts(rowid, title, abstract) VALUES (?,?,?)",
-                     (rid, data.get("title", ""), data.get("abstractNote", "")))
+        conn.execute(
+            "INSERT INTO items_fts(rowid, creators_text, title, abstract, date) "
+            "VALUES (?,?,?,?,?)",
+            (rid, creators_text, data.get("title", ""),
+             data.get("abstractNote", ""), data.get("date", "")))
     conn.commit()
     return rid
+
+
+def _fts_partial_update(conn, rid: int, **fields):
+    """Update FTS row preserving unmentioned fields."""
+    existing = conn.execute(
+        "SELECT creators_text, title, abstract, full_text, summary, date "
+        "FROM items_fts WHERE rowid=?", (rid,)
+    ).fetchone()
+    if existing:
+        vals = {
+            "creators_text": existing["creators_text"],
+            "title": existing["title"],
+            "abstract": existing["abstract"],
+            "full_text": existing["full_text"],
+            "summary": existing["summary"],
+            "date": existing["date"],
+        }
+    else:
+        vals = {"creators_text": "", "title": "", "abstract": "",
+                "full_text": "", "summary": "", "date": ""}
+    vals.update(fields)
+    conn.execute("DELETE FROM items_fts WHERE rowid=?", (rid,))
+    conn.execute(
+        "INSERT INTO items_fts(rowid, creators_text, title, abstract, full_text, summary, date) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (rid, vals["creators_text"], vals["title"], vals["abstract"],
+         vals["full_text"], vals["summary"], vals["date"]))
 
 
 def get_item_by_key(conn, key: str) -> dict | None:
@@ -159,32 +284,27 @@ def update_processing_level(conn, key: str, level: int):
 
 
 def update_full_text(conn, key: str, full_text: str):
-    """Store full text in FTS index."""
+    """Store full text in FTS index, preserving existing indexed fields."""
     row = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
     if row:
-        # FTS5 content-sync: delete then insert with rowid
-        conn.execute("DELETE FROM items_fts WHERE rowid=?", (row["id"],))
-        conn.execute("INSERT INTO items_fts(rowid, full_text) VALUES (?,?)",
-                     (row["id"], full_text))
+        _fts_partial_update(conn, row["id"], full_text=full_text)
         update_processing_level(conn, key, 2)
 
 
 def update_summary(conn, key: str, summary: str):
-    """Store LLM summary in FTS index and items table."""
+    """Store LLM summary in FTS index and items table, preserving existing fields."""
     row = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
     if row:
-        # FTS5 content-sync: delete then insert with rowid
-        conn.execute("DELETE FROM items_fts WHERE rowid=?", (row["id"],))
-        conn.execute("INSERT INTO items_fts(rowid, summary) VALUES (?,?)",
-                     (row["id"], summary))
-        conn.execute("UPDATE items SET local_summary = ? WHERE key = ?", (summary, key))
+        _fts_partial_update(conn, row["id"], summary=summary)
+        conn.execute("UPDATE items SET local_summary = ? WHERE key = ?",
+                     (summary, key))
         update_processing_level(conn, key, 3)
 
 
 # ── Search ──────────────────────────────────────────────────
 
 def search_fts(conn, query: str, top_k: int = 10, level_min: int = 0) -> list[dict]:
-    """Full-text search across title, abstract, full_text, summary."""
+    """Full-text search across creators_text, title, abstract, full_text, summary, date."""
     rows = conn.execute("""
         SELECT items.*, items_fts.rank
         FROM items_fts

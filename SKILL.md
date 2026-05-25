@@ -42,8 +42,12 @@ python scripts/search.py "surface codes" --mode rag --top-k 5
 ### Process Papers
 
 ```bash
-# Download PDF and convert to markdown (L2)
+# Download PDF and convert to markdown (L2) — single paper
 python scripts/ingest.py --key ABC123
+
+# Batch: acquire PDFs for all papers without PDF
+python scripts/ingest.py --batch
+python scripts/ingest.py --batch --limit 10     # first 10 only
 
 # Generate LLM summary (L3)
 python scripts/summarize.py --key ABC123
@@ -51,6 +55,12 @@ python scripts/summarize.py --key ABC123
 # Batch summarize all L2 papers
 python scripts/summarize.py --batch
 ```
+
+**PDF acquisition chain** (configurable via `pdf.sources` in config.yaml):
+1. **Unpaywall** — queries the Unpaywall API for legal open-access versions (no API key needed, email for rate limits)
+2. **Sci-Hub** — tries mirrors in rotation (`sci-hub.se`, `.st`, `.ru`)
+
+Configure `pdf.unpaywall.email` in config.yaml to avoid rate limiting.
 
 ### Deep Search (Web + Zotero)
 

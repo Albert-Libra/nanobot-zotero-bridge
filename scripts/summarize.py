@@ -1,8 +1,15 @@
 #!/usr/bin/env python
 """LLM auto-summary generation (L3) + Semantic Scholar citation fetching."""
 import argparse
+import io
 import json
 import sys
+
+# Fix Unicode output on Windows GBK console
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 import requests
 from db import get_db, init_db, get_item_by_key, get_all_items, update_summary, \
     upsert_citation, get_citations, set_db_path

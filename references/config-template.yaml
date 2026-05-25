@@ -8,8 +8,18 @@ sync:
 
 pdf:
   download_enabled: true
-  scihub_mirror: "https://sci-hub.se"
   download_timeout: 60
+  # PDF acquisition sources in priority order (first success wins):
+  #   unpaywall  — legal OA via Unpaywall API (free, email for rate limit)
+  #   scihub     — Sci-Hub fallback with mirror rotation
+  sources: ["unpaywall", "scihub"]
+  unpaywall:
+    email: ""             # Your email (Unpaywall requires it for fair-use rate limits)
+  scihub:
+    mirrors:
+      - "https://sci-hub.se"
+      - "https://sci-hub.st"
+      - "https://sci-hub.ru"
 
 storage:
   data_dir: "../zotero-data"
