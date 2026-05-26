@@ -80,11 +80,24 @@ python scripts/deep_search.py "CRISPR off-target prediction"
 
 ## Agent Interaction Rules
 
-1. **When user asks a scientific question**, first run `search.py <query>` against local Zotero DB
-2. **If relevant papers found**: cite them as primary references, inject via RAG
-3. **Always assess whether additional web search is needed** — Zotero is priority, not exclusive. Supplement with web results as the situation demands.
-4. **Suggest adding interesting web-found papers** to user's Zotero library.
-5. **When PDF acquisition fails** (ingest returns non-zero, or output shows "All sources exhausted"):
+### Literature Retrieval Strategy
+
+**RAG-first, full-text on demand.** Default to `search.py --mode rag --top-k 5` for discussion — only retrieve the most relevant paragraphs, not the whole paper. This saves context tokens and is faster.
+
+| User intent | Retrieval method |
+|------------|-----------------|
+| "这个论文里XX怎么处理的" / specific mechanism question | `search.py --mode rag` (default) |
+| "精读全文" / "逐段分析" / "给我完整摘要" / explicit deep-read request | `read_file` on the local fulltext `.md` |
+| Multi-paper comparison | RAG each paper first, then full-text only on key sections |
+
+### Rules
+
+1. **When user asks a scientific question**, first run `search.py <query>` against local Zotero DB. For keyword/mechanism queries, use RAG mode by default (`--mode rag --top-k 5`).
+2. **When re-discussing a previously processed paper**, check `<data_dir>/fulltext/<key>.md` and `<data_dir>/storage/<key>.md` — if L2 fulltext exists, the paper has been deep-analyzed before. Prioritize this local record over re-searching.
+3. **If relevant papers found**: cite them as primary references. Use RAG-injected context for discussion; only load full `.md` when user explicitly requests deep reading.
+4. **Always assess whether additional web search is needed** — Zotero is priority, not exclusive. Supplement with web results as the situation demands.
+5. **Suggest adding interesting web-found papers** to user's Zotero library.
+6. **When PDF acquisition fails** (ingest returns non-zero, or output shows "All sources exhausted"):
    - **Stop immediately** — do NOT silently fall back to abstract-only or web search
    - **Ask the user to provide the PDF file directly**, listing the paper title, first author, year, DOI, and Zotero key
    - Once the user provides the PDF, save it to `<data_dir>/pdfs/<key>.pdf` and re-run `ingest.py --key <key>` to complete L2 conversion
