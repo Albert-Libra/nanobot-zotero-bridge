@@ -72,6 +72,8 @@ def main():
                         help="Force full sync (ignore incremental state)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Max PDFs to download at depth >= 2 (0 = all)")
+    parser.add_argument("--enrich", action="store_true",
+                        help="Fetch missing abstracts from Semantic Scholar / Crossref after sync")
     args = parser.parse_args()
 
     config = load_config()
@@ -95,6 +97,12 @@ def main():
         print(f"  Error: {e}")
         conn.close()
         sys.exit(1)
+
+    # --- Abstract enrichment (if --enrich) ---
+    if args.enrich:
+        from enrich import enrich_abstracts
+        print(f"\n  --- Abstract enrichment ---")
+        enrich_abstracts(config)
 
     # --- Depth 2+: full-text PDF acquisition ---
     if args.depth >= 2:

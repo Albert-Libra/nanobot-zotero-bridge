@@ -352,6 +352,18 @@ def get_stats(conn) -> dict:
             "L3_summarized": l3, "with_pdf": pdf}
 
 
+# ── Abstract Enrichment ─────────────────────────────────────
+
+def update_abstract(conn, key: str, abstract: str):
+    """Update abstract in items table and FTS index, preserving other FTS fields."""
+    conn.execute("UPDATE items SET abstract = ?, processing_level = MAX(processing_level, 1) WHERE key = ?",
+                 (abstract, key))
+    row = conn.execute("SELECT id FROM items WHERE key = ?", (key,)).fetchone()
+    if row:
+        _fts_partial_update(conn, row["id"], abstract=abstract)
+    conn.commit()
+
+
 # ── Sync State ──────────────────────────────────────────────
 
 def load_sync_state(conn) -> dict:
