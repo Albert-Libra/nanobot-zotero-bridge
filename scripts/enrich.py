@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import time
+from pathlib import Path
 
 import requests
 
@@ -81,6 +82,12 @@ def fetch_abstract_s2_by_title(title: str) -> str | None:
     return None
 
 
+class EnrichState:
+    """Mutable container to collect enrichment results across the loop."""
+    def __init__(self):
+        self.failed_papers: list[dict] = []
+
+
 def enrich_abstracts(config: dict, keys: list[str] | None = None,
                      dry_run: bool = False, limit: int = 0) -> tuple[int, int]:
     """Enrich items missing abstracts.
@@ -98,6 +105,8 @@ def enrich_abstracts(config: dict, keys: list[str] | None = None,
     set_db_path(data_dir)
     conn = get_db()
     init_db(conn)
+
+    state = EnrichState()
 
     if keys:
         placeholders = ",".join("?" * len(keys))
@@ -157,14 +166,53 @@ def enrich_abstracts(config: dict, keys: list[str] | None = None,
         else:
             skipped += 1
             print("✗ (no abstract found)")
+            state.failed_papers.append({
+                "key": key,
+                "title": title or "Untitled",
+                "doi": doi or "",
+            })
 
         # Polite rate limiting: brief pause every 5 requests
         if (i + 1) % 5 == 0:
             time.sleep(0.5)
 
+    # Collect failed papers for user action
+    if state.failed_papers:
+        print(f"\n{'─' * 60}")
+        print(f"  ⚠  ACTION REQUIRED: {len(state.failed_papers)} paper(s) need manual abstracts")
+        print(f"{'─' * 60}")
+        for fp in state.failed_papers:
+            print(f"  [{fp['key']}] {fp['title'][:80]}")
+            if fp.get("doi"):
+                print(f"    DOI: {fp['doi']}")
+            print(f"    手动设置: python enrich.py --set-abstract {fp['key']} \"<paste abstract here>\"")
+            print(f"    或从文件: python enrich.py --set-abstract-file {fp['key']} <path.txt>")
+            print()
+
     print(f"\n  Done: {enriched} enriched, {skipped} skipped, {total} total")
     conn.close()
     return enriched, skipped
+
+
+def set_abstract_manually(config, key: str, abstract: str) -> bool:
+    """Set an abstract from user-provided text."""
+    data_dir = get_data_dir(config)
+    set_db_path(data_dir)
+    conn = get_db()
+    init_db(conn)
+
+    row = conn.execute("SELECT title FROM items WHERE key = ?", (key,)).fetchone()
+    if not row:
+        print(f"  ✗ Key not found: {key}")
+        conn.close()
+        return False
+
+    from db import update_abstract
+    update_abstract(conn, key, abstract)
+    title = (row["title"] or "?")[:60]
+    print(f"  ✓ [{key}] {title} — abstract set manually")
+    conn.close()
+    return True
 
 
 def main():
@@ -184,9 +232,36 @@ def main():
         "--limit", type=int, default=0,
         help="Max items to process (0 = unlimited; useful for testing)",
     )
+    parser.add_argument(
+        "--set-abstract", nargs=2, metavar=("KEY", "TEXT"),
+        help="Manually set abstract for a paper (KEY 'abstract text')",
+    )
+    parser.add_argument(
+        "--set-abstract-file", nargs=2, metavar=("KEY", "PATH"),
+        help="Manually set abstract from a text file (KEY path.txt)",
+    )
     args = parser.parse_args()
 
     config = load_config()
+
+    # ── Manual abstract setting modes ──
+    if args.set_abstract:
+        key, text = args.set_abstract
+        ok = set_abstract_manually(config, key, text)
+        return 0 if ok else 1
+
+    if args.set_abstract_file:
+        key, path = args.set_abstract_file
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+            ok = set_abstract_manually(config, key, text)
+            return 0 if ok else 1
+        except FileNotFoundError:
+            print(f"  ✗ File not found: {path}")
+            return 1
+        except Exception as e:
+            print(f"  ✗ Error reading file: {e}")
+            return 1
 
     if args.key:
         enrich_abstracts(config, keys=[args.key], dry_run=args.dry_run)
