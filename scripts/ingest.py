@@ -230,7 +230,12 @@ def ingest_paper(key: str, config: dict) -> bool:
                 pdf_url = None  # Reset to try next source
 
     if not pdf_path.exists():
-        print(f"  No PDF source found for DOI: {doi}")
+        print(f"  ALL SOURCES EXHAUSTED — could not acquire PDF for DOI: {doi}")
+        print(f"  Title: {title}")
+        print(f"  Key: {key}")
+        print(f"  → Agent: ask user to provide the PDF file manually.")
+        print(f"     Save to: {pdf_path}")
+        print(f"     Then re-run: python scripts/ingest.py --key {key}")
         conn.close()
         return False
 

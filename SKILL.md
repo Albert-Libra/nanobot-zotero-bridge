@@ -84,6 +84,10 @@ python scripts/deep_search.py "CRISPR off-target prediction"
 2. **If relevant papers found**: cite them as primary references, inject via RAG
 3. **Always assess whether additional web search is needed** — Zotero is priority, not exclusive. Supplement with web results as the situation demands.
 4. **Suggest adding interesting web-found papers** to user's Zotero library.
+5. **When PDF acquisition fails** (ingest returns non-zero, or output shows "All sources exhausted"):
+   - **Stop immediately** — do NOT silently fall back to abstract-only or web search
+   - **Ask the user to provide the PDF file directly**, listing the paper title, first author, year, DOI, and Zotero key
+   - Once the user provides the PDF, save it to `<data_dir>/pdfs/<key>.pdf` and re-run `ingest.py --key <key>` to complete L2 conversion
 
 ## Dependencies
 
